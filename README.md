@@ -11,13 +11,19 @@
 - 系统日志：通俗理解就是涉及代码层面的日志如某个类、方法输出的信息，便于开发、测试等人员调试程序、排查问题
 - 操作日志：系统中管理员、用户的某些操作如系统相关的分配账号权限，业务相关的如处理了订单，更新了库存等...，记录操作者的操作记录，便于后续分析存档
 
-
+项目地址https://github.com/sichaolong/simple-log-solution-scl
 
 
 项目结构：
 ```java
 simple-log-solution-scl
+    /-- canal：canal项目源码
     /-- simple-canal-example : 包含SimpleCanalClientExample客户端类测试canal
+    /-- simple-canal-kafka-examle：canal整合kafka，springboot整合kafka消费数据
+    /-- simple-logfile-example:原生方式log.info输出日志、、保存日志到文件，美团开源仓库基于AOP利用注解实现日志输出
+    /-- README.md 
+    /-- logs/ : 四种级别日志文件
+    /-- ...
 ```
 
 参考：
