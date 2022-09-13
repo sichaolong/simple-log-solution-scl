@@ -8,6 +8,7 @@
         <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
         <outputRelativeToContentRoot value="true" />
         <module name="simple-canal-example" />
+        <module name="simple-logstash-elk-example" />
         <module name="simple-canal-kafka-example" />
         <module name="simple-logfile-example" />
         <module name="simple-log-solution-scl" />

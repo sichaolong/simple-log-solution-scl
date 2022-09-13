@@ -59,7 +59,7 @@ canal 工作原理是通过master、slave之间的通信协议将自己伪装成
 - MySQL master 收到 dump 请求，开始推送 binary log 给 slave (即 canal )
 - canal 解析 binary log 对象(原始为 byte 流)
 
-![img](https://camo.githubusercontent.com/63881e271f889d4a424c55cea2f9c2065f63494fecac58432eac415f6e47e959/68747470733a2f2f696d672d626c6f672e6373646e696d672e636e2f32303139313130343130313733353934372e706e67)
+![img](README.assets/68747470733a2f2f696d672d626c6f672e6373646e696d672e636e2f32303139313130343130313733353934372e706e67)
 
 
 
@@ -452,9 +452,364 @@ public void modifyAddress(updateDeliveryRequest request){
 
 
 
-#### 三、ELK日志解决方案
+#### 三、ELK日志解决方案实践
 
-待更新...
+ELK架构演进参考https://www.cnblogs.com/tanwentao/p/15749435.html
+
+
+
+目前大多数项目都是采用微服务架构，在项目的初期，为了按计划上线就没有搭建日志收集分析平台，日志都是保存在服务器本地，看日志时一个个的找。随着项目的服务越来越多，各个服务都是集群部署，服务器数量也快速增长，此时就暴露了很多的问题：
+
+- 问题排查困难，查询一个服务的日志，需要登录多台服务器；
+- 日志串接困难，一个流程有多个节点，要把整个流程的日志串接起来工作量大；
+- 运维管理困难，不是每个同事都有登录服务器查看日志的权限，但又需要根据日志排查问题，就需要有权限的同事下载日志后给到相应负责的同事。
+- 系统预警困难，无法实现服务出现异常后，及时通知到相应的负责人
+
+
+
+正常情况下需要在linux服务器上安装服务或者使用docker拉去es、kibana、logstash镜像安装服务，这里我在windows上直接实践。
+
+
+
+
+
+##### 1、环境安装
+
+参考https://blog.csdn.net/weixin_45728976/article/details/106129058，尽量保证三个版本一致，我之前安装的es是7.13.3，下面两个保持一致
+
+- es官网：https://www.elastic.co/cn/downloads/elasticsearch
+
+- logstash官网：https://www.elastic.co/cn/downloads/logstash
+- kibana国内镜像：https://mirrors.huaweicloud.com/kibana/7.13.3/
+
+如果官网下载太慢直接从https://elasticsearch.cn/download/下载，启动es访问localhost:5600测试，启动kinaba访问localhost5601访问测试。
+
+对于logstash启动需要指定配置文件启动命令 `logstash -f ../config/logstash.conf`，logstash.conf内容，注意如果es配置了x-pack登录认证，这里的配置文件一定要配置账号密码，否则报错，见后面的报错...
+
+```conf
+input {
+  tcp {
+    mode => "server"
+    host => "0.0.0.0"
+    port => 4560
+    codec => json_lines
+  }
+}
+output {
+  elasticsearch {
+    hosts => "localhost:9200"
+    // es索引存储名称
+    index => "springboot-%{+YYYY.MM.dd}"
+    user => "elastic"
+    password => "jKr3gNyLcDnvv1ostjP0"
+  }
+}
+```
+
+
+
+然后安装一下插件`logstash-plugin install logstash-codec-json_lines`
+
+
+
+###### 报错解决
+
+报错：Elasticsearch built-in security features are not enabled. Without authentication, your cluster could be accessible to anyone. See https://www.elastic.co/guide/en/elasticsearch/reference/7.13/security-minimal-setup.html to enable security.意思就是本地的kibana不能直接操作es了，需要在es设置一个账户密码，在kibana配置文件中配置验证，然后才能连接执行命令。
+
+解决：按照官网的提示设置elasticsearch.yml文件启动es安全功能，参考：https://www.elastic.co/guide/en/elasticsearch/reference/7.13/security-minimal-setup.html
+
+
+
+```java
+// 执行 elasticsearch-setup-passwords auto 随机生成密码
+Changed password for user apm_system
+PASSWORD apm_system = xjs3ShoWt64oI6aXH31J
+
+Changed password for user kibana_system
+PASSWORD kibana_system = jRpUJIrydkAKVQeqyicg
+
+Changed password for user kibana
+PASSWORD kibana = jRpUJIrydkAKVQeqyicg
+
+Changed password for user logstash_system
+PASSWORD logstash_system = iIttpbbbgQPtbyyVVh9J
+
+Changed password for user beats_system
+PASSWORD beats_system = EXCCkvKRu3qACJ92flvf
+
+Changed password for user remote_monitoring_user
+PASSWORD remote_monitoring_user = FCoK0QL2cG5Z7DqjuHaB
+
+Changed password for user elastic
+PASSWORD elastic = jKr3gNyLcDnvv1ostjP0
+```
+
+保证三者都能启动成功。
+
+
+
+
+
+##### 2、SpringBoot整合logstash
+
+
+
+1、首先新建sprinboot工程，导入依赖
+
+```xml
+<!--集成logstash-->
+<dependency>
+    <groupId>net.logstash.logback</groupId>
+    <artifactId>logstash-logback-encoder</artifactId>
+    <version>5.3</version>
+</dependency>
+
+```
+
+
+
+2、添加配置文件logback-spring.xml让logback的日志输出到logstash
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 日志级别从低到高分为TRACE < DEBUG < INFO < WARN < ERROR < FATAL，如果设置为WARN，则低于WARN的信息都不会输出 -->
+
+<!-- scan:当此属性设置为true时，配置文档如果发生改变，将会被重新加载，默认值为true -->
+
+<!-- scanPeriod:设置监测配置文档是否有修改的时间间隔，如果没有给出时间单位，默认单位是毫秒。
+             当scan为true时，此属性生效。默认的时间间隔为1分钟。 -->
+<!-- debug:当此属性设置为true时，将打印出logback内部日志信息，实时查看logback运行状态。默认值为false。 -->
+
+
+<configuration  scan="true" scanPeriod="10 seconds" >
+    <contextName>logback-spring</contextName>
+
+    <!-- name的值是变量的名称，value的值时变量定义的值。通过定义的值会被插入到logger上下文中。定义后，可以使“${}”来使用变量。 -->
+    <!--    <property name="logging.path" value="./logs/" />-->
+
+
+    <!--0. 日志格式和颜色渲染 -->
+
+    <!-- 0.1彩色日志依赖的渲染类 -->
+    <conversionRule conversionWord="clr" converterClass="org.springframework.boot.logging.logback.ColorConverter" />
+    <conversionRule conversionWord="wex" converterClass="org.springframework.boot.logging.logback.WhitespaceThrowableProxyConverter" />
+    <conversionRule conversionWord="wEx" converterClass="org.springframework.boot.logging.logback.ExtendedWhitespaceThrowableProxyConverter" />
+
+    <!-- 0.2彩色日志格式 -->
+    <property name="CONSOLE_LOG_PATTERN" value="${CONSOLE_LOG_PATTERN:-%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(${LOG_LEVEL_PATTERN:-%5p}) %clr(${PID:- }){magenta} %clr(---){faint} %clr([%15.15t]){faint} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:-%wEx}}"/>
+
+    <!--1. 输出到控制台-->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <!--此日志appender是为开发使用，只配置最底级别，控制台输出的日志级别是大于或等于此级别的日志信息-->
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>INFO</level>
+        </filter>
+        <encoder>
+            <Pattern>${CONSOLE_LOG_PATTERN}</Pattern>
+            <!-- 设置字符集 -->
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!--2. 输出到文档-->
+    <!-- 2.1 level为 DEBUG 日志，时间滚动输出  -->
+    <appender name="DEBUG_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <!-- 正在记录的日志文档的路径及文档名 -->
+        <file>${logging.path}/web_debug.log</file>
+        <!--日志文档输出格式-->
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n</pattern>
+            <charset>UTF-8</charset> <!-- 设置字符集 -->
+        </encoder>
+        <!-- 日志记录器的滚动策略，按日期，按大小记录 -->
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <!-- 日志归档 -->
+            <fileNamePattern>${logging.path}/web-debug-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <timeBasedFileNamingAndTriggeringPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedFNATP">
+                <maxFileSize>100MB</maxFileSize>
+            </timeBasedFileNamingAndTriggeringPolicy>
+            <!--日志文档保留天数-->
+            <maxHistory>15</maxHistory>
+        </rollingPolicy>
+        <!-- 此日志文档只记录debug级别的 -->
+        <filter class="ch.qos.logback.classic.filter.LevelFilter">
+            <level>debug</level>
+            <onMatch>ACCEPT</onMatch>
+            <onMismatch>DENY</onMismatch>
+        </filter>
+    </appender>
+
+    <!-- 2.2 level为 INFO 日志，时间滚动输出  -->
+    <appender name="INFO_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <!-- 正在记录的日志文档的路径及文档名 -->
+        <file>${logging.path}/web_info.log</file>
+        <!--日志文档输出格式-->
+        <encoder>
+            <pattern>"%d{yyyy-MM-dd HH:mm:ss.SSS} %t %-5level %X{name} %logger{30}.%method:%L - %msg%n"</pattern>
+
+            <!--            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n</pattern>-->
+            <charset>UTF-8</charset>
+        </encoder>
+        <!-- 日志记录器的滚动策略，按日期，按大小记录 -->
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <!-- 每天日志归档路径以及格式 -->
+            <fileNamePattern>${logging.path}/web-info-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <timeBasedFileNamingAndTriggeringPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedFNATP">
+                <maxFileSize>100MB</maxFileSize>
+            </timeBasedFileNamingAndTriggeringPolicy>
+            <!--日志文档保留天数-->
+            <maxHistory>15</maxHistory>
+        </rollingPolicy>
+        <!-- 此日志文档只记录info级别的 -->
+        <filter class="ch.qos.logback.classic.filter.LevelFilter">
+            <level>info</level>
+            <onMatch>ACCEPT</onMatch>
+            <onMismatch>DENY</onMismatch>
+        </filter>
+    </appender>
+
+    <!-- 2.3 level为 WARN 日志，时间滚动输出  -->
+    <appender name="WARN_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <!-- 正在记录的日志文档的路径及文档名 -->
+        <file>${logging.path}/web_warn.log</file>
+        <!--日志文档输出格式-->
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n</pattern>
+            <charset>UTF-8</charset> <!-- 此处设置字符集 -->
+        </encoder>
+        <!-- 日志记录器的滚动策略，按日期，按大小记录 -->
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>${logging.path}/web-warn-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <timeBasedFileNamingAndTriggeringPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedFNATP">
+                <maxFileSize>100MB</maxFileSize>
+            </timeBasedFileNamingAndTriggeringPolicy>
+            <!--日志文档保留天数-->
+            <maxHistory>15</maxHistory>
+        </rollingPolicy>
+        <!-- 此日志文档只记录warn级别的 -->
+        <filter class="ch.qos.logback.classic.filter.LevelFilter">
+            <level>warn</level>
+            <onMatch>ACCEPT</onMatch>
+            <onMismatch>DENY</onMismatch>
+        </filter>
+    </appender>
+
+    <!-- 2.4 level为 ERROR 日志，时间滚动输出  -->
+    <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <!-- 正在记录的日志文档的路径及文档名 -->
+        <file>${logging.path}/web_error.log</file>
+        <!--日志文档输出格式-->
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n</pattern>
+            <charset>UTF-8</charset> <!-- 此处设置字符集 -->
+        </encoder>
+        <!-- 日志记录器的滚动策略，按日期，按大小记录 -->
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>${logging.path}/web-error-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <timeBasedFileNamingAndTriggeringPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedFNATP">
+                <maxFileSize>100MB</maxFileSize>
+            </timeBasedFileNamingAndTriggeringPolicy>
+            <!--日志文档保留天数-->
+            <maxHistory>15</maxHistory>
+        </rollingPolicy>
+        <!-- 此日志文档只记录ERROR级别的 -->
+        <filter class="ch.qos.logback.classic.filter.LevelFilter">
+            <level>ERROR</level>
+            <onMatch>ACCEPT</onMatch>
+            <onMismatch>DENY</onMismatch>
+        </filter>
+    </appender>
+
+
+    <!--3. 输出到logstash的appender -->
+    <appender name="LOGSTASH" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
+        <!--可以访问的logstash日志收集端口，在logstash.conf文件配置-->
+        <destination>127.0.0.1:4560</destination>
+        <encoder charset="UTF-8" class="net.logstash.logback.encoder.LogstashEncoder"/>
+    </appender>
+
+    <!--
+        <logger>用来设置某一个包或者具体的某一个类的日志打印级别、
+        以及指定<appender>。<logger>仅有一个name属性，
+        一个可选的level和一个可选的addtivity属性。
+        name:用来指定受此logger约束的某一个包或者具体的某一个类。
+        level:用来设置打印级别，大小写无关：TRACE, DEBUG, INFO, WARN, ERROR, ALL 和 OFF，
+              还有一个特俗值INHERITED或者同义词NULL，代表强制执行上级的级别。
+              如果未设置此属性，那么当前logger将会继承上级的级别。
+        addtivity:是否向上级logger传递打印信息。默认是true。
+        <logger name="org.springframework.web" level="info"/>
+        <logger name="org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProcessor" level="INFO"/>
+    -->
+
+    <!--
+        使用mybatis的时候，sql语句是debug下才会打印，而这里我们只配置了info，所以想要查看sql语句的话，有以下两种操作：
+        第一种把<root level="info">改成<root level="DEBUG">这样就会打印sql，不过这样日志那边会出现很多其他消息
+        第二种就是单独给dao下目录配置debug模式，代码如下，这样配置sql语句会打印，其他还是正常info级别：
+        【logging.level.org.mybatis=debug logging.level.dao=debug】
+     -->
+
+    <!--
+        root节点是必选节点，用来指定最基础的日志输出级别，只有一个level属性
+        level:用来设置打印级别，大小写无关：TRACE, DEBUG, INFO, WARN, ERROR, ALL 和 OFF，
+        不能设置为INHERITED或者同义词NULL。默认是DEBUG
+        可以包含零个或多个元素，标识这个appender将会添加到这个logger。
+    -->
+
+    <!-- 4. 最终的策略 -->
+    <!-- 4.1 开发环境:打印控制台-->
+
+    <!--    <springProfile name="dev">-->
+        <!--    <logger name="com.yifan.im.sys" level="debug"/>&lt;!&ndash; 修改此处扫描包名 &ndash;&gt;-->
+    <!--    </springProfile>-->
+
+<!--    指定生效的级别-->
+    <root level="INFO_FILE">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="DEBUG_FILE" />
+        <appender-ref ref="INFO_FILE" />
+        <appender-ref ref="WARN_FILE" />
+        <appender-ref ref="ERROR_FILE" />
+        <appender-ref ref="LOGSTASH" />
+    </root>
+
+    <!--     4.2 生产环境:输出到文档-->
+    <springProfile name="pro">
+        <root level="info">
+            <appender-ref ref="CONSOLE" />
+            <appender-ref ref="DEBUG_FILE" />
+            <appender-ref ref="INFO_FILE" />
+            <appender-ref ref="ERROR_FILE" />
+            <appender-ref ref="WARN_FILE" />
+            <appender-ref ref="LOGSTASH" />
+        </root>
+    </springProfile>
+</configuration>
+
+```
+
+
+
+3、启动项目测试，查看kibana有无日志
+
+![image-20220913152935051](README.assets/image-20220913152935051.png)
+
+kibana可视化查看es数据https://blog.csdn.net/liuming690452074/article/details/120106397
+
+
+
+![image-20220913153620500](README.assets/image-20220913153620500.png)
+
+###### 报错解决
+
+其中logstash报了一个错:`BadResponseCodeError, :message=>"Got response code '401' contacting Elasticsearch at URL 'http://localhost:9200/'"}`，因为配置了es的x-pack，因此需要在logstash.conf配置认证。解决方法https://elasticsearch.cn/question/2345
+
+
+
+
+
+
+
+
 
 
 
