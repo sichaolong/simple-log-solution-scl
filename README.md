@@ -20,9 +20,10 @@ simple-log-solution-scl
     /-- canal：canal项目源码
     /-- simple-canal-example : 包含SimpleCanalClientExample客户端类测试canal
     /-- simple-canal-kafka-examle：canal整合kafka，springboot整合kafka消费数据
-    /-- simple-logfile-example:原生方式log.info输出日志、、保存日志到文件，美团开源仓库基于AOP利用注解实现日志输出
+    /-- simple-logfile-example:原生方式log.info输出日志、保存日志到文件，美团开源仓库基于AOP利用注解实现日志输出
+    /-- simple-logstash-elk-examle：入门级别轻量级的日志解决方案实践
+    /-- simple-filebeat-elk-examle：引入filebeat、kafka之后海量数据级别的日志解决方案实现
     /-- README.md 
-    /-- logs/ : 四种级别日志文件
     /-- ...
 ```
 
@@ -446,17 +447,9 @@ public void modifyAddress(updateDeliveryRequest request){
 
 待更新...
 
-
-
-
-
-
-
 #### 三、ELK日志解决方案实践
 
 ELK架构演进参考https://www.cnblogs.com/tanwentao/p/15749435.html
-
-
 
 目前大多数项目都是采用微服务架构，在项目的初期，为了按计划上线就没有搭建日志收集分析平台，日志都是保存在服务器本地，看日志时一个个的找。随着项目的服务越来越多，各个服务都是集群部署，服务器数量也快速增长，此时就暴露了很多的问题：
 
@@ -550,7 +543,7 @@ PASSWORD elastic = jKr3gNyLcDnvv1ostjP0
 
 
 
-##### 2、SpringBoot整合logstash
+##### 2、SpringBoot整合入门级的ELK
 
 
 
@@ -805,11 +798,681 @@ kibana可视化查看es数据https://blog.csdn.net/liuming690452074/article/deta
 
 
 
+##### 3、引入kafka、filebeat升级版的ELK
+
+上述基本ELK架构入门级版本的缺点主要是两个
+
+- 在大并发情况下，日志传输峰值比较大。如果直接写入ES，ES的HTTP API处理能力有限，在日志写入频繁的情况下可能会超时、丢失，所以需要一个缓冲中间件。
+- 注意了，Logstash将Log读出、过滤、输出都是在应用服务器上进行的，这势必会造成服务器上占用系统资源较高，性能不佳，需要进行拆分。
+
+因此升级版的ELK架构引入kafka、filebeat，它是一个轻量级的日志收集处理工具(Agent)，Filebeat占用资源少，适合于在各个服务器上搜集日志后传输给Logstash，官方也推荐此工具。基本流程就是filebeat会读取app生成的xxx.log文件，Filebeat由两个主要组件组成：prospectors 和 harvesters。这两个组件协同工作将文件变动发送到指定的输出kafka中，然后logstash消费kafka即可。加入kafka的好处就是如果其他业务需要进行日志分析，可以直接消费kafka里面的日志，不同业务模块之间的耦合度较小。
 
 
 
+![img](README.assets/2701066-20211230162755841-1156560867.png)
+
+整合参考：https://blog.51cto.com/zhongmayisheng/4292182
+
+###### 1、使用log4j2代替默认的Logback
 
 
+
+新建springboot工程，pom依赖如下
+
+```xml
+<dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+            <!--  排除spring-boot-starter-logging ，也就是排除默认的LogBack，使用log4j2依赖。-->
+            <exclusions>
+                <exclusion>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-logging</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!-- log4j2 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-log4j2</artifactId>
+        </dependency>
+        <!-- 异步日志-->
+        <dependency>
+            <groupId>com.lmax</groupId>
+            <artifactId>disruptor</artifactId>
+            <version>3.3.4</version>
+        </dependency>
+        <!--  lombok-->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.junit.vintage</groupId>
+                    <artifactId>junit-vintage-engine</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+    </dependencies>
+```
+
+在resources目录下新建log4j.xml文件
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="INFO" schema="Log4J-V2.0.xsd" monitorInterval="600" >
+<!--    声明变量-->
+
+    <Properties>
+        <Property name="LOG_HOME">./simple-filebeat-elk-example/logs</Property>
+        <property name="FILE_NAME">collector</property>
+        <property name="patternLayout">[%d{yyyy-MM-dd'T'HH:mm:ss.SSSZZ}] [%level{length=5}] [%thread-%tid] [%logger] [%X{hostName}] [%X{ip}] [%X{applicationName}] [%F,%L,%C,%M] [%m] ## '%ex'%n</property>
+    </Properties>
+
+<!--    1、输出形式-->
+    <Appenders>
+<!--        1、1 控制台输出-->
+        <Console name="CONSOLE" target="SYSTEM_OUT">
+            <PatternLayout pattern="${patternLayout}"/>
+        </Console>
+<!--        1、2 输出到文件-->
+        <RollingRandomAccessFile name="appAppender" fileName="${LOG_HOME}/app-${FILE_NAME}.log" filePattern="${LOG_HOME}/app-${FILE_NAME}-%d{yyyy-MM-dd}-%i.log" >
+            <PatternLayout pattern="${patternLayout}" />
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1"/>
+                <SizeBasedTriggeringPolicy size="500MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="20"/>
+        </RollingRandomAccessFile>
+        <RollingRandomAccessFile name="errorAppender" fileName="${LOG_HOME}/error-${FILE_NAME}.log" filePattern="${LOG_HOME}/error-${FILE_NAME}-%d{yyyy-MM-dd}-%i.log" >
+            <PatternLayout pattern="${patternLayout}" />
+            <Filters>
+                <ThresholdFilter level="warn" onMatch="ACCEPT" onMismatch="DENY"/>
+            </Filters>
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1"/>
+                <SizeBasedTriggeringPolicy size="500MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="20"/>
+        </RollingRandomAccessFile>
+    </Appenders>
+
+<!--    2、指定级别-->
+    <Loggers>
+        <!-- 业务相关 异步logger -->
+        <AsyncLogger name="henu.soft.*" level="info" includeLocation="true">
+            <AppenderRef ref="appAppender"/>
+        </AsyncLogger>
+        <AsyncLogger name="henu.soft.*" level="info" includeLocation="true">
+            <AppenderRef ref="errorAppender"/>
+        </AsyncLogger>
+        <Root level="info">
+            <Appender-Ref ref="CONSOLE"/>
+            <Appender-Ref ref="appAppender"/>
+            <AppenderRef ref="errorAppender"/>
+        </Root>
+    </Loggers>
+</Configuration>
+
+```
+
+启动项目，查看控制台打印的日志以及输出文件的日志格式，其中日志前面的电脑名称、本地ip地址、模块地址来源于工具类NetUtil，具体是使用log4j2的MDC存储，然后在xml文件指定输出格式取出相应属性值。
+
+```java
+[2022-09-13T17:21:37.471+08:00] [INFO] [http-nio-6677-exec-1-30] [henu.soft.filebeat.test.controller.TestController] [DESKTOP-VJBPC13] [10.0.248.35] [simple-filebeat-elk-example] [TestController.java,21,henu.soft.filebeat.test.controller.TestController,test] [我是一条info日志] ## ''
+
+[2022-09-13T17:21:37.474+08:00] [WARN] [http-nio-6677-exec-1-30] [henu.soft.filebeat.test.controller.TestController] [DESKTOP-VJBPC13] [10.0.248.35] [simple-filebeat-elk-example] [TestController.java,23,henu.soft.filebeat.test.controller.TestController,test] [我是一条warn日志] ## ''
+
+[2022-09-13T17:21:37.475+08:00] [ERROR] [http-nio-6677-exec-1-30] [henu.soft.filebeat.test.controller.TestController] [DESKTOP-VJBPC13] [10.0.248.35] [simple-filebeat-elk-example] [TestController.java,25,henu.soft.filebeat.test.controller.TestController,test] [我是一条error日志] ## ''
+```
+
+
+
+###### 2、配置kafka
+
+
+
+启动kafka，创建两个topic，用于待会接受filebeat的输出
+
+
+
+```
+## 创建topic
+kafka-topics.sh --zookeeper 192.168.11.111:2181 --create --topic app-log-collector --partitions 1  --replication-factor 1
+kafka-topics.sh --zookeeper 192.168.11.111:2181 --create --topic error-log-collector --partitions 1  --replication-factor 1 
+
+# 查看topic
+
+kafka-topics.sh --zookeeper 192.168.11.111:2181 --topic app-log-test --describe
+```
+
+
+
+###### 3、配置filebeat
+
+修改filebeat.yaml文件
+
+```yml
+###################### Filebeat Configuration Example #########################
+
+# This file is an example configuration file highlighting only the most common
+# options. The filebeat.reference.yml file from the same directory contains all the
+# supported options with more comments. You can use it as a reference.
+#
+# You can find the full configuration reference here:
+# https://www.elastic.co/guide/en/beats/filebeat/index.html
+
+# For more available modules and options, please see the filebeat.reference.yml sample
+# configuration file.
+
+# ============================== Filebeat inputs ===============================
+
+filebeat.inputs:
+
+  # Each - is an input. Most options can be set at the input level, so
+  # you can use different inputs for various configurations.
+  # Below are the input specific configurations.
+
+  - type: log
+
+    # Change to true to enable this input configuration.
+    enabled: false
+
+    # Paths that should be crawled and fetched. Glob based paths.
+    paths:
+      - /var/log/*.log
+      #- c:\programdata\elasticsearch\logs\*
+
+    # Exclude lines. A list of regular expressions to match. It drops the lines that are
+    # matching any regular expression from the list.
+    #exclude_lines: ['^DBG']
+
+    # Include lines. A list of regular expressions to match. It exports the lines that are
+    # matching any regular expression from the list.
+    #include_lines: ['^ERR', '^WARN']
+
+    # Exclude files. A list of regular expressions to match. Filebeat drops the files that
+    # are matching any regular expression from the list. By default, no files are dropped.
+    #exclude_files: ['.gz$']
+
+    # Optional additional fields. These fields can be freely picked
+    # to add additional information to the crawled log files for filtering
+    #fields:
+    #  level: debug
+    #  review: 1
+
+    ### Multiline options
+
+    # Multiline can be used for log messages spanning multiple lines. This is common
+    # for Java Stack Traces or C-Line Continuation
+
+    # The regexp Pattern that has to be matched. The example pattern matches all lines starting with [
+    #multiline.pattern: ^\[
+
+    # Defines if the pattern set under pattern should be negated or not. Default is false.
+    #multiline.negate: false
+
+    # Match can be set to "after" or "before". It is used to define if lines should be append to a pattern
+    # that was (not) matched before or after or as long as a pattern is not matched based on negate.
+    # Note: After is the equivalent to previous and before is the equivalent to to next in Logstash
+    #multiline.match: after
+
+  # filestream is an experimental input. It is going to replace log input in the future.
+  - type: filestream
+
+    # Change to true to enable this input configuration.
+    enabled: false
+
+    # Paths that should be crawled and fetched. Glob based paths.
+    paths:
+      - /var/log/*.log
+      #- c:\programdata\elasticsearch\logs\*
+
+    # Exclude lines. A list of regular expressions to match. It drops the lines that are
+    # matching any regular expression from the list.
+    #exclude_lines: ['^DBG']
+
+    # Include lines. A list of regular expressions to match. It exports the lines that are
+    # matching any regular expression from the list.
+    #include_lines: ['^ERR', '^WARN']
+
+    # Exclude files. A list of regular expressions to match. Filebeat drops the files that
+    # are matching any regular expression from the list. By default, no files are dropped.
+    #prospector.scanner.exclude_files: ['.gz$']
+
+    # Optional additional fields. These fields can be freely picked
+    # to add additional information to the crawled log files for filtering
+    #fields:
+    #  level: debug
+    #  review: 1
+
+  # ============================== Filebeat modules ==============================
+
+  # 这里配置发送到kafka
+  - type: log
+    enabled: true
+    paths:
+      ## app-服务名称.log, 为什么写死，防止发生轮转抓取历史数据
+      - E:\项目\simple-log-solution-scl\simple-filebeat-elk-example\logs\app-collector.log
+    #定义写入 ES 时的 _type 值
+    document_type: "app-log"
+    multiline:
+      #pattern: '^\s*(\d{4}|\d{2})\-(\d{2}|[a-zA-Z]{3})\-(\d{2}|\d{4})'   # 指定匹配的表达式（匹配以 2017-11-15 08:04:23:889 时间格式开头的字符串）
+      pattern: '^\['                              # 指定匹配的表达式（匹配以 "{ 开头的字符串）
+      negate: true                                # 是否匹配到
+      match: after                                # 合并到上一行的末尾
+      max_lines: 2000                             # 最大的行数
+      timeout: 2s                                 # 如果在规定时间没有新的日志事件就不等待后面的日志
+    fields:
+      logbiz: collector
+      logtopic: app-log-collector   ## 按服务划分用作kafka topic
+      evn: dev
+
+  - type: log
+    enabled: true
+    paths:
+      - E:\项目\simple-log-solution-scl\simple-filebeat-elk-example\logs\error-collector.log
+    document_type: "error-log"
+    multiline:
+      #pattern: '^\s*(\d{4}|\d{2})\-(\d{2}|[a-zA-Z]{3})\-(\d{2}|\d{4})'   # 指定匹配的表达式（匹配以 2017-11-15 08:04:23:889 时间格式开头的字符串）
+      pattern: '^\['                              # 指定匹配的表达式（匹配以 "{ 开头的字符串）
+      negate: true                                # 是否匹配到
+      match: after                                # 合并到上一行的末尾
+      max_lines: 2000                             # 最大的行数
+      timeout: 2s                                 # 如果在规定时间没有新的日志事件就不等待后面的日志
+    fields:
+      logbiz: collector
+      logtopic: error-log-collector   ## 按服务划分用作kafka topic
+      evn: dev
+
+output.kafka:
+  enabled: true
+  hosts: ["localhost:9092"]
+  topic: '%{[fields.logtopic]}'
+  partition.hash:
+    reachable_only: true
+  compression: gzip
+  max_message_bytes: 1000000
+  required_acks: 1
+logging.to_files: true
+
+
+
+filebeat.config.modules:
+  # Glob pattern for configuration loading
+  path: ${path.config}/modules.d/*.yml
+
+  # Set to true to enable config reloading
+  reload.enabled: false
+
+  # Period on which files under path should be checked for changes
+  #reload.period: 10s
+
+# ======================= Elasticsearch template setting =======================
+
+setup.template.settings:
+  index.number_of_shards: 1
+  #index.codec: best_compression
+  #_source.enabled: false
+
+
+# ================================== General ===================================
+
+# The name of the shipper that publishes the network data. It can be used to group
+# all the transactions sent by a single shipper in the web interface.
+#name:
+
+# The tags of the shipper are included in their own field with each
+# transaction published.
+#tags: ["service-X", "web-tier"]
+
+# Optional fields that you can specify to add additional information to the
+# output.
+#fields:
+#  env: staging
+
+# ================================= Dashboards =================================
+# These settings control loading the sample dashboards to the Kibana index. Loading
+# the dashboards is disabled by default and can be enabled either by setting the
+# options here or by using the `setup` command.
+#setup.dashboards.enabled: false
+
+# The URL from where to download the dashboards archive. By default this URL
+# has a value which is computed based on the Beat name and version. For released
+# versions, this URL points to the dashboard archive on the artifacts.elastic.co
+# website.
+#setup.dashboards.url:
+
+# =================================== Kibana ===================================
+
+# Starting with Beats version 6.0.0, the dashboards are loaded via the Kibana API.
+# This requires a Kibana endpoint configuration.
+setup.kibana:
+
+# Kibana Host
+# Scheme and port can be left out and will be set to the default (http and 5601)
+# In case you specify and additional path, the scheme is required: http://localhost:5601/path
+# IPv6 addresses should always be defined as: https://[2001:db8::1]:5601
+#host: "localhost:5601"
+
+# Kibana Space ID
+# ID of the Kibana Space into which the dashboards should be loaded. By default,
+# the Default Space will be used.
+#space.id:
+
+# =============================== Elastic Cloud ================================
+
+# These settings simplify using Filebeat with the Elastic Cloud (https://cloud.elastic.co/).
+
+# The cloud.id setting overwrites the `output.elasticsearch.hosts` and
+# `setup.kibana.host` options.
+# You can find the `cloud.id` in the Elastic Cloud web UI.
+#cloud.id:
+
+# The cloud.auth setting overwrites the `output.elasticsearch.username` and
+# `output.elasticsearch.password` settings. The format is `<user>:<pass>`.
+#cloud.auth:
+
+# ================================== Outputs ===================================
+
+# Configure what output to use when sending the data collected by the beat.
+
+# ---------------------------- Elasticsearch Output ----------------------------
+#output.elasticsearch:
+  # Array of hosts to connect to.
+  #hosts: ["localhost:9200"]
+
+  # Protocol - either `http` (default) or `https`.
+  #protocol: "https"
+
+  # Authentication credentials - either API key or username/password.
+  #api_key: "id:api_key"
+  #username: "elastic"
+  #password: "changeme"
+
+  # ------------------------------ Logstash Output -------------------------------
+  #output.logstash:
+  # The Logstash hosts
+  #hosts: ["localhost:5044"]
+
+  # Optional SSL. By default is off.
+  # List of root certificates for HTTPS server verifications
+  #ssl.certificate_authorities: ["/etc/pki/root/ca.pem"]
+
+  # Certificate for SSL client authentication
+  #ssl.certificate: "/etc/pki/client/cert.pem"
+
+  # Client Certificate Key
+  #ssl.key: "/etc/pki/client/cert.key"
+
+# ================================= Processors =================================
+processors:
+  - add_host_metadata:
+      when.not.contains.tags: forwarded
+  - add_cloud_metadata: ~
+  - add_docker_metadata: ~
+  - add_kubernetes_metadata: ~
+
+    # ================================== Logging ===================================
+
+    # Sets log level. The default log level is info.
+    # Available log levels are: error, warning, info, debug
+    #logging.level: debug
+
+    # At debug level, you can selectively enable logging only for some components.
+    # To enable all selectors use ["*"]. Examples of other selectors are "beat",
+    # "publisher", "service".
+    #logging.selectors: ["*"]
+
+    # ============================= X-Pack Monitoring ==============================
+    # Filebeat can export internal metrics to a central Elasticsearch monitoring
+    # cluster.  This requires xpack monitoring to be enabled in Elasticsearch.  The
+    # reporting is disabled by default.
+
+    # Set to true to enable the monitoring reporter.
+    #monitoring.enabled: false
+
+    # Sets the UUID of the Elasticsearch cluster under which monitoring data for this
+    # Filebeat instance will appear in the Stack Monitoring UI. If output.elasticsearch
+    # is enabled, the UUID is derived from the Elasticsearch cluster referenced by output.elasticsearch.
+    #monitoring.cluster_uuid:
+
+    # Uncomment to send the metrics to Elasticsearch. Most settings from the
+    # Elasticsearch output are accepted here as well.
+    # Note that the settings should point to your Elasticsearch *monitoring* cluster.
+    # Any setting that is not set is automatically inherited from the Elasticsearch
+    # output configuration, so if you have the Elasticsearch output configured such
+    # that it is pointing to your Elasticsearch monitoring cluster, you can simply
+    # uncomment the following line.
+    #monitoring.elasticsearch:
+
+    # ============================== Instrumentation ===============================
+
+    # Instrumentation support for the filebeat.
+    #instrumentation:
+    # Set to true to enable instrumentation of filebeat.
+    #enabled: false
+
+    # Environment in which filebeat is running on (eg: staging, production, etc.)
+    #environment: ""
+
+    # APM Server hosts to report instrumentation results to.
+    #hosts:
+    #  - http://localhost:8200
+
+    # API Key for the APM Server(s).
+    # If api_key is set then secret_token will be ignored.
+    #api_key:
+
+    # Secret token for the APM Server(s).
+    #secret_token:
+
+
+# ================================= Migration ==================================
+
+# This allows to enable 6.7 migration aliases
+#migration.6_to_7.enabled: true
+
+
+```
+
+然后跑起来应用，测试filebeat是否能将info和error日志是发送到kafka
+
+![image-20220913180344296](README.assets/image-20220913180344296.png)
+
+
+
+测试结果正确，消息格式
+
+```json
+{
+    "@timestamp":"2022-09-13T10:06:30.941Z",
+    "@metadata":{
+        "beat":"filebeat",
+        "type":"_doc",
+        "version":"7.13.3"
+    },
+    "host":{
+        "os":{
+            "platform":"windows",
+            "version":"10.0",
+            "family":"windows",
+            "name":"Windows 10 Home China",
+            "kernel":"10.0.22000.856 (WinBuild.160101.0800)",
+            "build":"22000.856",
+            "type":"windows"
+        },
+        "id":"3df61e5a-95b0-4ec7-9bce-09f84e227cea",
+        "ip":[
+            "fe80::89c5:bb7b:b3f2:6c0d",
+            "169.254.108.13",
+            "fe80::8bd:3d8:3849:82b9",
+            "169.254.130.185",
+            "fe80::7131:1b4b:74d3:a5b9",
+            "169.254.165.185",
+            "fe80::ec12:81d5:90ba:7d33",
+            "169.254.125.51",
+            "fe80::28b6:1903:76a0:4456",
+            "192.168.26.1",
+            "fe80::997:1c7f:24d3:25b0",
+            "192.168.24.1",
+            "fe80::39c6:c542:cea1:ea07",
+            "10.0.248.35",
+            "fe80::740d:2bcd:3383:e18c",
+            "172.19.208.1"
+        ],
+        "mac":[
+            "00:e0:4c:85:3e:a3",
+            "00:ff:7d:50:95:ea",
+            "3c:f0:11:ea:74:88",
+            "3e:f0:11:ea:74:87",
+            "00:50:56:c0:00:01",
+            "00:50:56:c0:00:08",
+            "3c:f0:11:ea:74:87",
+            "00:15:5d:e2:40:e5"
+        ],
+        "hostname":"DESKTOP-VJBPC13",
+        "architecture":"x86_64",
+        "name":"DESKTOP-VJBPC13"
+    },
+    "log":{
+        "offset":5596,
+        "file":{
+            "path":"E:\\项目\\simple-log-solution-scl\\simple-filebeat-elk-example\\logs\\app-collector.log"
+        }
+    },
+    "message":"[2022-09-13T18:06:25.424+08:00] [ERROR] [http-nio-6677-exec-4-33] [henu.soft.filebeat.test.controller.TestController] [DESKTOP-VJBPC13] [10.0.248.35] [simple-filebeat-elk-example] [TestController.java,25,henu.soft.filebeat.test.controller.TestController,test] [我是一条error日志] ## ''",
+    "input":{
+        "type":"log"
+    },
+    "fields":{
+        "evn":"dev",
+        "logbiz":"collector",
+        "logtopic":"app-log-collector"
+    },
+    "agent":{
+        "hostname":"DESKTOP-VJBPC13",
+        "ephemeral_id":"8dad3af5-228c-45f0-bb4c-95a4293ac26b",
+        "id":"658d9af1-076e-424e-a48d-b05bdaf601a3",
+        "name":"DESKTOP-VJBPC13",
+        "type":"filebeat",
+        "version":"7.13.3"
+    },
+    "ecs":{
+        "version":"1.8.0"
+    }
+}
+```
+
+
+
+###### 4、配置logstash
+
+
+
+logstash干的工作就是将kafka的消息作为input，然后转换格式，输出到es中，因此需要配置kafka、es相关连接信息。新建logstash-script.conf配置文件配置一下内容
+
+
+
+```conf
+input {
+  kafka {
+    ## app-log-服务名称
+    topics_pattern => "app-log-.*"
+    bootstrap_servers => "localhost:9092"
+    codec => json
+    consumer_threads => 1 ## 增加consumer的并行消费线程数
+    decorate_events => true
+    #auto_offset_rest => "latest"
+    group_id => "app-log-group"
+   }
+   
+   kafka {
+    ## error-log-服务名称
+    topics_pattern => "error-log-.*"
+    bootstrap_servers => "localhost:9092"
+    codec => json
+    consumer_threads => 1
+    decorate_events => true
+    #auto_offset_rest => "latest"
+    group_id => "error-log-group"
+   }
+
+}
+
+filter {
+
+  ## 时区转换
+  ruby {
+    code => "event.set('index_time',event.timestamp.time.localtime.strftime('%Y.%m.%d'))"
+  }
+
+  if "app-log" in [fields][logtopic]{
+    grok {
+        ## 表达式,这里对应的是Springboot输出的日志格式
+        match => ["message", "\[%{NOTSPACE:currentDateTime}\] \[%{NOTSPACE:level}\] \[%{NOTSPACE:thread-id}\] \[%{NOTSPACE:class}\] \[%{DATA:hostName}\] \[%{DATA:ip}\] \[%{DATA:applicationName}\] \[%{DATA:location}\] \[%{DATA:messageInfo}\] ## (\'\'|%{QUOTEDSTRING:throwable})"]
+    }
+  }
+
+  if "error-log" in [fields][logtopic]{
+    grok {
+        ## 表达式
+        match => ["message", "\[%{NOTSPACE:currentDateTime}\] \[%{NOTSPACE:level}\] \[%{NOTSPACE:thread-id}\] \[%{NOTSPACE:class}\] \[%{DATA:hostName}\] \[%{DATA:ip}\] \[%{DATA:applicationName}\] \[%{DATA:location}\] \[%{DATA:messageInfo}\] ## (\'\'|%{QUOTEDSTRING:throwable})"]
+    }
+  }
+
+}
+## 测试输出到控制台：
+output {
+  stdout { codec => rubydebug }
+}
+
+## elasticsearch：
+output {
+
+  if "app-log" in [fields][logtopic]{
+  ## es插件
+    elasticsearch {
+       # es服务地址
+       hosts => ["192.168.11.35:9200"]
+       # 用户名密码
+       user => "elastic"
+       password => "123456"
+       ## 索引名，+ 号开头的，就会自动认为后面是时间格式：
+       ## javalog-app-service-2019.01.23
+       index => "app-log-%{[fields][logbiz]}-%{index_time}"
+       # 是否嗅探集群ip：一般设置true；http://192.168.11.35:9200/_nodes/http?pretty
+       # 通过嗅探机制进行es集群负载均衡发日志消息
+       sniffing => true
+       # logstash默认自带一个mapping模板，进行模板覆盖
+       template_overwrite => true
+    }
+  }
+
+  if "error-log" in [fields][logtopic]{
+    elasticsearch {
+       hosts => ["192.168.11.35:9200"]
+       user => "elastic"
+       password => "123456"
+       index => "error-log-%{[fields][logbiz]}-%{index_time}"
+       sniffing => true
+       template_overwrite => true
+    }
+  }
+
+
+}
+
+```
+
+启动`logstash -f ..\script\logstash-script.conf`，然后在启动es、kibana，访问app查看日志是否打印，日志是否已经在kibana可以看到。
 
 
 

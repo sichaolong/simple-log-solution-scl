@@ -9,6 +9,7 @@
         <option value="$PROJECT_DIR$/simple-canal-kafka-example/pom.xml" />
         <option value="$PROJECT_DIR$/simple-logfile-example/pom.xml" />
         <option value="$PROJECT_DIR$/simple-logstash-elk-example/pom.xml" />
+        <option value="$PROJECT_DIR$/simple-filebeat-elk-example/pom.xml" />
       </list>
     </option>
   </component>

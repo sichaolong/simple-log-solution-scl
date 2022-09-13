@@ -5,6 +5,8 @@
     <file url="file://$PROJECT_DIR$/simple-canal-example/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/simple-canal-kafka-example/src/main/java" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/simple-canal-kafka-example/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/simple-filebeat-elk-example/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/simple-filebeat-elk-example/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/simple-logfile-example/src/main/java" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/simple-logfile-example/src/main/resources" charset="UTF-8" />
     <file url="file://$PROJECT_DIR$/simple-logstash-elk-example/src/main/java" charset="UTF-8" />
