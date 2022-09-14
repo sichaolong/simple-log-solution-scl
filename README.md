@@ -445,7 +445,423 @@ public void modifyAddress(updateDeliveryRequest request){
 
 ###### 基于AOP注解日志实现原理分析
 
-待更新...
+starter源码在simple-logfile-example/other-annotation-logsoultion-source-code，以此进行源码分析
+
+![image-20220914160136723](README.assets/image-20220914160136723.png)
+
+**首先回顾自动装配的原理**
+
+SpringBoot 定义了一套接口规范，这套规范规定：SpringBoot 在启动时会扫描外部引用 jar 包中的`META-INF/spring.factories`文件，将文件中配置的类型信息加载到 Spring 容器（此处涉及到 JVM 类加载机制与 Spring 的容器知识），并执行类中定义的各种操作。对于外部 jar 来说，只需要按照 SpringBoot 定义的标准，就能将自己的功能装置进 SpringBoot。想要使用某功能，只需要引入starter即可
+
+大概可以把 `@SpringBootApplication`看作是 `@Configuration`、`@EnableAutoConfiguration`、`@ComponentScan` 注解的集合。根据 SpringBoot 官网，这三个注解的作用分别是：
+
+- `@EnableAutoConfiguration`：启用 SpringBoot 的自动配置机制
+- `@Configuration`：允许在上下文中注册额外的 bean 或导入其他配置类
+- `@ComponentScan`： 扫描被`@Component` (`@Service`,`@Controller`)注解的 bean，注解默认会扫描启动类所在的包下所有的类 ，可以自定义不扫描某些 bean。
+
+`EnableAutoConfiguration` 只是一个简单地注解，自动装配核心功能的实现实际是通过 `AutoConfigurationImportSelector`类。可以看出，`AutoConfigurationImportSelector` 类实现了 `ImportSelector`接口，也就实现了这个接口中的 `selectImports`方法，该方法主要用于**获取所有符合条件的类的全限定类名，这些类需要被加载到 IoC 容器中**。
+
+不光是这个依赖下的`META-INF/spring.factories`被读取到，所有 Spring Boot Starter 下的`META-INF/spring.factories`中声明的自动配置类，都会被读取到。当然全部导入也不现实，因此又经历了一遍筛选，`@ConditionalOnXXX` 中的所有条件都满足，该类才会生效。
+
+```java
+@Configuration
+// 检查相关的类：RabbitTemplate 和 Channel是否存在
+// 存在才会加载
+@ConditionalOnClass({ RabbitTemplate.class, Channel.class })
+@EnableConfigurationProperties(RabbitProperties.class)
+@Import(RabbitAnnotationDrivenConfiguration.class)
+public class RabbitAutoConfiguration {
+}
+
+```
+
+自己写一个简单的starter栗子，基本步骤
+
+1. 新建Maven工程，在pom文件定义相关信息，如需要用到Spring则引入`spring-boot-dependencies`进而引入`spring-boot-autoconfigure`
+2. 定义一个接口如XxxService，对外暴露可以直接调用。定义一个实现类XxxServiceImpl实现接口，加上@Component注解放置Spring容器
+3. 编写XxxAutoConfiguration 自动配置类，类上标注@Configuration注解标识是一个类似xml的配置类，然后配置@ComponentScan扫描需要暴露的XxxServiceImpl所在的包。(将扫包的义务交给Starter自己，如果都需要主模块main函数去扫包，则后续不易维护，在SpringBoot之前，需要将扫包配置到xml文件中，交给主模块完成，耦合度较高)
+4. 最后在Spring的根路径下，即resources文件夹下创建META-INF/spring.factories文件，用于指定当前Starter的XxxAutoConfiguration自动配置类的路径
+
+
+
+###### 1、配置读取与自动配置
+
+（1）来到logRecord，它是是一个SpringBoot工程，作为一个starter是完全没问题的，定义了
+
+```properties
+# spring.factories文件
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+  cn.monitor4all.logRecord.configuration.LogRecordAutoConfiguration
+  
+```
+
+（2）来到该starter的自动配置类
+
+```java
+// 1、LogRecordAutoConfiguration类
+
+package cn.monitor4all.logRecord.configuration;
+
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.Import;
+
+@ComponentScan("cn.monitor4all.logRecord") // 扫包
+@Import({RabbitMqSenderConfiguration.class,
+         RocketMqSenderConfiguration.class}) // 导入其他功能必要配置类，这两个类内部需要用到@ConditionOnXxx注解
+public class LogRecordAutoConfiguration {
+
+}
+
+// 2、RabbitMqSenderConfiguration类为例
+
+@Slf4j
+@Configuration
+@ConditionalOnProperty(name = "log-record.data-pipeline", havingValue = LogConstants.DataPipeline.RABBIT_MQ)
+@EnableConfigurationProperties({LogRecordProperties.class})
+public class RabbitMqSenderConfiguration {
+
+    private String rabbitHost;
+    private int rabbitPort;
+    private String exchange;
+    private String queue;
+    private String routingKey;
+    private String username;
+    private String password;
+
+    @Autowired
+    private LogRecordProperties properties;
+
+    @PostConstruct // 这个注解会在bean执行完构造参数之后，实例化之后，初始化之前完成读取properties文件读取,然后从LogRecordProperties实例拿到配置
+    public void rabbitMqConfig() {
+        this.rabbitHost = properties.getRabbitMqProperties().getHost();
+        this.rabbitPort = properties.getRabbitMqProperties().getPort();
+        this.queue = properties.getRabbitMqProperties().getQueueName();
+        this.routingKey = properties.getRabbitMqProperties().getRoutingKey();
+        this.exchange= properties.getRabbitMqProperties().getExchangeName();
+        this.username= properties.getRabbitMqProperties().getUsername();
+        this.password= properties.getRabbitMqProperties().getPassword();
+        log.info("LogRecord RabbitMqSenderConfiguration host [{}] port [{}] exchange [{}] queue [{}] routingKey [{}]",
+                rabbitHost, rabbitPort, exchange, queue, routingKey);
+    }
+    // ... 省了MQ需要的一些@Bean的组件 ...
+}
+
+
+
+// 3、LogRecordProperties 类
+
+@Data
+@ConfigurationProperties(prefix = "log-record")
+public class LogRecordProperties {
+    // ... 省略pojo类型的成员变量 ...对应着properties文件配置的值
+}
+
+
+```
+
+
+
+###### 2、自定义注解
+
+自定义了四个注解
+
+```
+@OperationLog：核心功能体现，将注解标注指定方法上面，然后指定一些模板，以及SpringEL从上下文、方法参数 等取值。 如 "xxx 干了 xxx"，然后Spring会在方法执行的时候AOP拦截制定方法，然后输出日志到控制台、文件、MQ等
+
+@LogRecordFunc：日志功能拓展，使用该注解可以自定义方法，@OperationLog可以从自定义的方法获取指定返回值，如每条记录需要一个业务bizId，可以自定义方法返回，然后使用SpringEL表达式取出来
+
+@LogRecordDiff：日志共嫩拓展，字段别名相关
+
+@OperationLogs：日志功能拓展，重复注解相关
+
+```
+
+
+
+###### 3、AOP方法环绕增强
+
+声明切面，拦截标注@OperationLog的方法，前置先解析一次方法，将重复的@OperationLog放到一个Map，然后方法执行，后置增强在LogRecordContext上下文中写入执行后信息，可以理解为kv形式的键值对，然后提交给线程池进行日志处理（控制台输出，发送到MQ）
+
+![image-20220914171653411](README.assets/image-20220914171653411.png)
+
+```java
+
+@Aspect
+@Component
+@Slf4j
+public class SystemLogAspect {
+
+    @Autowired(required = false)
+    private LogRecordThreadPool logRecordThreadPool;
+
+    @Autowired(required = false)
+    private LogService logService;
+
+    @Autowired(required = false)
+    private IOperationLogGetService iOperationLogGetService;
+
+    @Autowired(required = false)
+    private IOperatorIdGetService iOperatorIdGetService;
+
+    private final SpelExpressionParser parser = new SpelExpressionParser();
+
+    private final DefaultParameterNameDiscoverer discoverer = new DefaultParameterNameDiscoverer();
+
+    @Around("@annotation(cn.monitor4all.logRecord.annotation.OperationLog) " +
+            "|| @annotation(cn.monitor4all.logRecord.annotation.OperationLogs)")
+    public Object doAround(ProceedingJoinPoint pjp) throws Throwable {
+        Object result;
+        OperationLog[] annotations;
+        List<LogDTO> logDTOList = new ArrayList<>();
+        Map<OperationLog, LogDTO> logDtoMap = new LinkedHashMap<>();
+        StopWatch stopWatch = null;
+        Long executionTime = null;
+
+        // 注解解析：若解析失败直接不执行日志切面逻辑
+        try {
+            Method method = getMethod(pjp);
+            annotations = method.getAnnotationsByType(OperationLog.class);
+        } catch (Throwable throwable) {
+            return pjp.proceed();
+        }
+
+        // 日志切面逻辑
+        try {
+            // 方法执行前日志切面
+            try {
+                // 将前置和后置执行的注解分开处理并保证最终写入顺序
+                for (OperationLog annotation : annotations) {
+                    if (annotation.executeBeforeFunc()) {
+                        LogDTO logDTO = resolveExpress(annotation, pjp);
+                        if (logDTO != null) {
+                            logDtoMap.put(annotation, logDTO);
+                        }
+                    }
+                }
+                stopWatch = new StopWatch();
+                stopWatch.start();
+            } catch (Throwable throwableBeforeFunc) {
+                log.error("OperationLogAspect doAround before function, error:", throwableBeforeFunc);
+            }
+            // 原方法执行
+            result = pjp.proceed();
+            // 方法成功执行后日志切面
+            try {
+                if (stopWatch != null) {
+                    stopWatch.stop();
+                    executionTime = stopWatch.getTotalTimeMillis();
+                }
+                // 在LogRecordContext中写入执行后信息
+                LogRecordContext.putVariable(LogRecordContext.CONTEXT_KEY_NAME_RETURN, result);
+                for (OperationLog annotation : annotations) {
+                    if (!annotation.executeBeforeFunc()) {
+                        LogDTO logDTO = resolveExpress(annotation, pjp);
+                        if (logDTO != null) {
+                            logDtoMap.put(annotation, logDTO);
+                        }
+                    }
+                }
+                // 写入成功执行后日志
+                logDTOList = new ArrayList<>(logDtoMap.values());
+                logDtoMap.forEach((annotation, logDTO) -> {
+                    // 若自定义成功失败，则logDTO.getSuccess非null
+                    if (logDTO.getSuccess() == null) {
+                        logDTO.setSuccess(true);
+                    }
+                    if (annotation.recordReturnValue()) {
+                        logDTO.setReturnStr(JSON.toJSONString(result));
+                    }
+                });
+            } catch (Throwable throwableAfterFuncSuccess) {
+                log.error("OperationLogAspect doAround after function success, error:", throwableAfterFuncSuccess);
+            }
+
+        }
+        // 原方法执行异常
+        catch (Throwable throwable) {
+            // 方法异常执行后日志切面
+            try {
+                if (stopWatch != null) {
+                    stopWatch.stop();
+                    executionTime = stopWatch.getTotalTimeMillis();
+                }
+                // 在LogRecordContext中写入执行后信息
+                LogRecordContext.putVariable(LogRecordContext.CONTEXT_KEY_NAME_ERROR_MSG, throwable.getMessage());
+                for (OperationLog annotation : annotations) {
+                    if (!annotation.executeBeforeFunc()) {
+                        logDtoMap.put(annotation, resolveExpress(annotation, pjp));
+                    }
+                }
+                // 写入异常执行后日志
+                logDTOList = new ArrayList<>(logDtoMap.values());
+                logDTOList.forEach(logDTO -> {
+                    logDTO.setSuccess(false);
+                    logDTO.setException(throwable.getMessage());
+                });
+            } catch (Throwable throwableAfterFuncFailure) {
+                log.error("OperationLogAspect doAround after function failure, error:", throwableAfterFuncFailure);
+            }
+            // 抛出原方法异常
+            throw throwable;
+        } finally {
+            try {
+                // 提交日志至主线程或线程池
+                Long finalExecutionTime = executionTime;
+                Consumer<LogDTO> createLogFunction = logDTO -> {
+                    try {
+                        // 记录执行时间
+                        logDTO.setExecutionTime(finalExecutionTime);
+                        // 发送日志本地监听
+                        if (iOperationLogGetService != null) {
+                            iOperationLogGetService.createLog(logDTO);
+                        }
+                        // 发送消息管道
+                        if (logService != null) {
+                            logService.createLog(logDTO);
+                        }
+                    } catch (Throwable throwable) {
+                        log.error("OperationLogAspect send logDTO error", throwable);
+                    }
+                };
+                if (logRecordThreadPool != null) {
+                    logDTOList.forEach(logDTO -> logRecordThreadPool.getLogRecordPoolExecutor().submit(() -> createLogFunction.accept(logDTO)));
+                } else {
+                    logDTOList.forEach(createLogFunction);
+                }
+                // 清除Context：每次方法执行一次
+                LogRecordContext.clearContext();
+            } catch (Throwable throwableFinal) {
+                log.error("OperationLogAspect doAround final error", throwableFinal);
+            }
+        }
+        return result;
+    }
+
+    private LogDTO resolveExpress(OperationLog annotation, JoinPoint joinPoint) {
+        LogDTO logDTO = null;
+        String bizIdSpel = annotation.bizId();
+        String bizTypeSpel = annotation.bizType();
+        String tagSpel = annotation.tag();
+        String msgSpel = annotation.msg();
+        String extraSpel = annotation.extra();
+        String operatorIdSpel = annotation.operatorId();
+        String conditionSpel = annotation.condition();
+        String successSpel = annotation.success();
+        String bizId = bizIdSpel;
+        String bizType = bizTypeSpel;
+        String tag = tagSpel;
+        String msg = msgSpel;
+        String extra = extraSpel;
+        String operatorId = operatorIdSpel;
+        Boolean functionExecuteSuccess = null;
+        try {
+            Object[] arguments = joinPoint.getArgs();
+            Method method = getMethod(joinPoint);
+            String[] params = discoverer.getParameterNames(method);
+            StandardEvaluationContext context = LogRecordContext.getContext();
+            CustomFunctionRegistrar.register(context);
+            if (params != null) {
+                for (int len = 0; len < params.length; len++) {
+                    context.setVariable(params[len], arguments[len]);
+                }
+            }
+
+            // condition 处理：SpEL解析 必须符合表达式
+            if (StringUtils.isNotBlank(conditionSpel)) {
+                Expression conditionExpression = parser.parseExpression(conditionSpel);
+                boolean passed = Boolean.TRUE.equals(conditionExpression.getValue(context, Boolean.class));
+                if (!passed) {
+                    return null;
+                }
+            }
+
+            // success 处理：SpEL解析 必须符合表达式
+            if (StringUtils.isNotBlank(successSpel)) {
+                Expression successExpression = parser.parseExpression(successSpel);
+                functionExecuteSuccess = Boolean.TRUE.equals(successExpression.getValue(context, Boolean.class));
+            }
+
+            // bizId 处理：SpEL解析 必须符合表达式
+            if (StringUtils.isNotBlank(bizIdSpel)) {
+                Expression bizIdExpression = parser.parseExpression(bizIdSpel);
+                bizId = bizIdExpression.getValue(context, String.class);
+            }
+
+            // bizType 处理：SpEL解析 必须符合表达式
+            if (StringUtils.isNotBlank(bizTypeSpel)) {
+                Expression bizTypeExpression = parser.parseExpression(bizTypeSpel);
+                bizType = bizTypeExpression.getValue(context, String.class);
+            }
+
+            // tag 处理：SpEL解析 必须符合表达式
+            if (StringUtils.isNotBlank(tagSpel)) {
+                Expression tagExpression = parser.parseExpression(tagSpel);
+                tag = tagExpression.getValue(context, String.class);
+            }
+
+            // msg 处理：SpEL解析 必须符合表达式 若为实体则JSON序列化实体
+            if (StringUtils.isNotBlank(msgSpel)) {
+                Expression msgExpression = parser.parseExpression(msgSpel);
+                Object msgObj = msgExpression.getValue(context, Object.class);
+                msg = msgObj instanceof String ? (String) msgObj : JSON.toJSONString(msgObj, SerializerFeature.WriteMapNullValue);
+            }
+
+            // extra 处理：SpEL解析 必须符合表达式 若为实体则JSON序列化实体
+            if (StringUtils.isNotBlank(extraSpel)) {
+                Expression extraExpression = parser.parseExpression(extraSpel);
+                Object extraObj = extraExpression.getValue(context, Object.class);
+                extra = extraObj instanceof String ? (String) extraObj : JSON.toJSONString(extraObj, SerializerFeature.WriteMapNullValue);
+            }
+
+            // operatorId 处理：优先级 注解传入 > 自定义接口实现
+            // 必须符合表达式
+            if (iOperatorIdGetService != null) {
+                operatorId = iOperatorIdGetService.getOperatorId();
+            }
+            if (StringUtils.isNotBlank(operatorIdSpel)) {
+                Expression operatorIdExpression = parser.parseExpression(operatorIdSpel);
+                operatorId = operatorIdExpression.getValue(context, String.class);
+            }
+
+            logDTO = new LogDTO();
+            logDTO.setLogId(UUID.randomUUID().toString());
+            logDTO.setBizId(bizId);
+            logDTO.setBizType(bizType);
+            logDTO.setTag(tag);
+            logDTO.setOperateDate(new Date());
+            logDTO.setMsg(msg);
+            logDTO.setExtra(extra);
+            logDTO.setOperatorId(operatorId);
+            logDTO.setSuccess(functionExecuteSuccess);
+            logDTO.setDiffDTOList(LogRecordContext.getDiffDTOList());
+        } catch (Exception e) {
+            log.error("OperationLogAspect resolveExpress error", e);
+        } finally {
+            // 清除Diff实体列表：每次注解执行一次
+            LogRecordContext.clearDiffDTOList();
+        }
+        return logDTO;
+    }
+
+    private Method getMethod(JoinPoint joinPoint) {
+        Method method = null;
+        try {
+            Signature signature = joinPoint.getSignature();
+            MethodSignature ms = (MethodSignature) signature;
+            Object target = joinPoint.getTarget();
+            method = target.getClass().getMethod(ms.getName(), ms.getParameterTypes());
+        } catch (NoSuchMethodException e) {
+            log.error("OperationLogAspect getMethod error", e);
+        }
+        return method;
+    }
+}
+
+```
+
+
+
+
 
 #### 三、ELK日志解决方案实践
 
